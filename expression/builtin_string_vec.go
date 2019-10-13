@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/parser/ast"
 	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
@@ -701,11 +702,81 @@ func (b *builtinSubstring3ArgsSig) vecEvalString(input *chunk.Chunk, result *chu
 }
 
 func (b *builtinTrim3ArgsSig) vectorized() bool {
-	return false
+	return true
 }
 
+// evalString evals a builtinTrim3ArgsSig, corresponding to trim(str, remstr, direction)
+// See https://dev.mysql.com/doc/refman/5.7/en/string-functions.html#function_trim
 func (b *builtinTrim3ArgsSig) vecEvalString(input *chunk.Chunk, result *chunk.Column) error {
-	return errors.Errorf("not implemented")
+	var (
+		d string
+	)
+	n := input.NumRows()
+	buf, err := b.bufAllocator.get(types.ETString, n)
+	if err != nil {
+		return err
+	}
+	defer b.bufAllocator.put(buf)
+	if err := b.args[0].VecEvalString(b.ctx, input, buf); err != nil {
+		return err
+	}
+
+	buf1, err := b.bufAllocator.get(types.ETString, n)
+	if err != nil {
+		return err
+	}
+	defer b.bufAllocator.put(buf1)
+	if err := b.args[1].VecEvalString(b.ctx, input, buf1); err != nil {
+		return err
+	}
+
+	buf2, err := b.bufAllocator.get(types.ETInt, n)
+	if err != nil {
+		return err
+	}
+	defer b.bufAllocator.put(buf2)
+	if err := b.args[2].VecEvalInt(b.ctx, input, buf2); err != nil {
+		return err
+	}
+
+	result.ReserveString(n)
+	nums := buf2.Int64s()
+	for i := 0; i < n; i++ {
+		if buf.IsNull(i) || buf1.IsNull(i) || buf2.IsNull(i) {
+			result.AppendNull()
+			continue
+		}
+
+		str := buf.GetString(i)
+		remstr := buf1.GetString(i)
+		x := nums[i]
+		isRemStrNull := buf1.IsNull(i)
+
+		direction := ast.TrimDirectionType(x)
+		if direction == ast.TrimLeading {
+			if isRemStrNull {
+				d = strings.TrimLeft(str, spaceChars)
+			} else {
+				d = trimLeft(str, remstr)
+			}
+		} else if direction == ast.TrimTrailing {
+			if isRemStrNull {
+				d = strings.TrimRight(str, spaceChars)
+			} else {
+				d = trimRight(str, remstr)
+			}
+		} else {
+			if isRemStrNull {
+				d = strings.Trim(str, spaceChars)
+			} else {
+				d = trimLeft(str, remstr)
+				d = trimRight(d, remstr)
+			}
+		}
+		result.AppendString(d)
+	}
+
+	return nil
 }
 
 func (b *builtinOrdSig) vectorized() bool {
